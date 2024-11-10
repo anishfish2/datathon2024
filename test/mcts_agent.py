@@ -5,6 +5,10 @@ import math
 import time
 import logging
 
+# ============================== #
+#         Logging Setup          #
+# ============================== #
+
 # Configure logging for Player 1
 player1_logger = logging.getLogger('Player1Logger')
 player1_logger.setLevel(logging.DEBUG)  # Set the desired logging level
@@ -35,9 +39,13 @@ player2_handler.setFormatter(player2_formatter)
 # Add the handler to the Player 2 logger
 player2_logger.addHandler(player2_handler)
 
-# Optionally, prevent loggers from propagating to the root logger
+# Prevent loggers from propagating to the root logger
 player1_logger.propagate = False
 player2_logger.propagate = False
+
+# ============================== #
+#           Node Class           #
+# ============================== #
 
 class Node:
     def __init__(self, game_state, parent=None, move=None, agent=None):
@@ -59,40 +67,52 @@ class Node:
         self.agent = agent            # Reference to the agent
         self.untried_moves = self.agent.get_possible_moves(self.game_state) if self.agent else []
         self.player = self.game_state.current_player  # Player who made the move
-    
+
     def expand(self):
-        """Expand the node by creating a child for each possible move."""
-        for move in self.untried_moves.copy():
-            # Apply move to create a new game state
-            next_state = copy.deepcopy(self.game_state)
-            if len(move) == 2:
-                if not next_state.is_valid_placement(move[0], move[1]):
-                    self.untried_moves.remove(move)
-                    continue
-            elif len(move) == 4:
-                if not next_state.is_valid_move(*move):
-                    self.untried_moves.remove(move)
-                    continue
+        """Expand the node by creating one child for an untried move."""
+        if not self.untried_moves:
+            return None  # No moves to expand
+
+        # Select one move to expand (random selection)
+        move = self.untried_moves.pop()
+
+        # Apply move to create a new game state
+        next_state = copy.deepcopy(self.game_state)
+        try:
             if len(move) == 2:
                 r, c = move
+                if not next_state.is_valid_placement(r, c):
+                    self.agent.logger.debug(f"Invalid placement move during expansion: {move}")
+                    return self.expand()  # Try expanding another move
                 next_state.place_checker(r, c)
             elif len(move) == 4:
                 r0, c0, r1, c1 = move
+                if not next_state.is_valid_move(*move):
+                    self.agent.logger.debug(f"Invalid movement move during expansion: {move}")
+                    return self.expand()  # Try expanding another move
                 next_state.move_checker(r0, c0, r1, c1)
-            next_state.turn_count += 1
-
-            # Check for a win
-            winner = next_state.check_winner()
-            if winner != EMPTY:
-                next_state.current_player = EMPTY  # No further moves
             else:
-                next_state.current_player *= -1    # Switch player
+                self.agent.logger.debug(f"Unknown move format during expansion: {move}")
+                return self.expand()  # Try expanding another move
+        except ValueError as e:
+            self.agent.logger.debug(f"Error applying move {move} during expansion: {e}")
+            return self.expand()  # Try expanding another move
 
-            # Create child node
-            child_node = Node(next_state, parent=self, move=move, agent=self.agent)
-            self.children.append(child_node)
-            self.untried_moves.remove(move)
-        return self.children
+        next_state.turn_count += 1
+
+        # Check for a win
+        winner = next_state.check_winner()
+        if winner != EMPTY:
+            next_state.current_player = EMPTY  # Terminal state
+        else:
+            next_state.current_player *= -1    # Switch player
+
+        # Create child node
+        child_node = Node(next_state, parent=self, move=move, agent=self.agent)
+        self.children.append(child_node)
+        self.agent.logger.debug(f"Expanded move {move} resulting in new node with winner: {winner}")
+
+        return child_node  # Return the newly created child
 
     def is_fully_expanded(self):
         """Check if all possible moves have been expanded."""
@@ -105,12 +125,14 @@ class Node:
             if child.visits == 0:
                 uct_value = float('inf')  # Prioritize unvisited nodes
             else:
-                uct_value = (child.wins / child.visits) + c_param * math.sqrt((2 * math.log(self.visits)) / child.visits)
+                exploitation = child.wins / child.visits
+                exploration = c_param * math.sqrt((2 * math.log(self.visits)) / child.visits)
+                uct_value = exploitation + exploration
             choices_weights.append(uct_value)
-        
+
         if not choices_weights:
             return None  # No children to select from
-        
+
         # Select the child with the highest UCT value
         best_index = choices_weights.index(max(choices_weights))
         return self.children[best_index]
@@ -123,14 +145,17 @@ class Node:
         best_index = visits.index(max(visits))
         return self.children[best_index]
 
+# ============================== #
+#         MCTS Agent Class       #
+# ============================== #
 
 class MCTSAgent:
     def __init__(self, player=PLAYER1):
         self.player = player
-        self.time_limit = 1  # Time limit per move in seconds
-        self.beam_width = 5  # Beam width for Beam MCTS
+        self.time_limit = 2  # Time limit per move in seconds
+        self.beam_width = 16  # Beam width for Beam MCTS
         self.max_simulation_depth = 0
-        
+
         # Assign the appropriate logger based on the player
         if self.player == PLAYER1:
             self.logger = player1_logger
@@ -141,36 +166,103 @@ class MCTSAgent:
         """Returns list of all possible moves in current state."""
         moves = []
         current_pieces = game.p1_pieces if game.current_player == PLAYER1 else game.p2_pieces
-        
+
         if current_pieces < NUM_PIECES:
-            # placement moves
+            # Placement moves
             for r in range(BOARD_SIZE):
                 for c in range(BOARD_SIZE):
                     if game.is_valid_placement(r, c):
                         moves.append((r, c))
         else:
-            # movement moves
+            # Movement moves
             for r0 in range(BOARD_SIZE):
                 for c0 in range(BOARD_SIZE):
                     if game.board[r0][c0] == game.current_player:
                         for r1 in range(BOARD_SIZE):
                             for c1 in range(BOARD_SIZE):
                                 if game.is_valid_move(r0, c0, r1, c1):
-                                        moves.append((r0, c0, r1, c1))
+                                    moves.append((r0, c0, r1, c1))
+        self.logger.debug(f"Possible moves generated: {len(moves)} moves")
         return moves
-        
+
+    def validate_move(self, game, move, possible_moves):
+        """
+        Validates the move. If invalid, attempts to pass or selects a random valid move.
+
+        Args:
+            game (Game): The current game state.
+            move (list or tuple): The move to validate.
+            possible_moves (list): List of all possible valid moves.
+
+        Returns:
+            list or tuple: A valid move.
+        """
+        if self.is_move_valid(game, move):
+            return move
+        else:
+            self.logger.warning(f"Invalid move detected: {move}")
+            # Attempt to pass if the game supports it
+            if hasattr(game, 'can_pass') and game.can_pass():
+                self.logger.info("Attempting to pass the turn.")
+                return ['pass']
+            else:
+                # Select a random valid move
+                if possible_moves:
+                    random_move = random.choice(possible_moves)
+                    self.logger.info(f"Selecting a random valid move: {random_move}")
+                    return random_move
+                else:
+                    self.logger.error("No possible moves available to select.")
+                    return None  # No moves available
+
+    def is_move_valid(self, game, move):
+        """
+        Checks if the move is valid in the current game state.
+
+        Args:
+            game (Game): The current game state.
+            move (list or tuple): The move to check.
+
+        Returns:
+            bool: True if valid, False otherwise.
+        """
+        try:
+            if move == ['pass']:
+                return hasattr(game, 'can_pass') and game.can_pass()
+            if len(move) == 2:
+                return game.is_valid_placement(move[0], move[1])
+            elif len(move) == 4:
+                return game.is_valid_move(*move)
+            else:
+                return False
+        except:
+            return False
+
     def get_best_move(self, game):
-        print("number of pieces: ", game.p1_pieces, game.p2_pieces)
+        """
+        Determines the best move using Beam MCTS, incorporating blocking logic.
+
+        Args:
+            game (Game): The current game state.
+
+        Returns:
+            list or tuple: The best move to make.
+        """
+        self.logger.debug("Starting to compute the best move.")
         self.simulation_count = 0
         self.max_simulation_depth = 0
         possible_moves = self.get_possible_moves(game)
-        
+
         current_pieces = game.p1_pieces if game.current_player == PLAYER1 else game.p2_pieces
         enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
 
+        # ============================== #
+        #        Immediate Win Check     #
+        # ============================== #
+
         if current_pieces < NUM_PIECES:
-            print("still under")
-            # Check for a win
+            self.logger.debug("Player is still placing pieces.")
+            # Check for a winning move by placing a piece
             for row in range(BOARD_SIZE):
                 for col in range(BOARD_SIZE):
                     if game.board[row][col] != EMPTY:
@@ -181,17 +273,23 @@ class MCTSAgent:
                     except ValueError:
                         continue  # Skip invalid placements
                     if temp.check_winner() == self.player:
-                        self.logger.info("FOUND A WINNER")
-                        return [row, col]
+                        self.logger.info(f"FOUND A WINNER by placing at ({row}, {col})")
+                        validated_move = self.validate_move(game, [row, col], possible_moves)
+                        return validated_move
 
-        # **Generalized Threat Checks**
+        # ============================== #
+        #      Blocking Enemy Threats    #
+        # ============================== #
+
+        # Generalized Threat Checks with Wrap-Around
         blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
         if blocking_move:
             self.logger.debug(f"Blocking enemy threat by placing at {blocking_move}")
             self.logger.info(f"Blocking enemy threat by placing at {blocking_move}")
-            return blocking_move
+            validated_move = self.validate_move(game, blocking_move, possible_moves)
+            return validated_move
 
-        # Check for a block
+        # Specific Block: Check if enemy can win immediately and block
         for row in range(BOARD_SIZE):
             for col in range(BOARD_SIZE):
                 if game.board[row][col] != EMPTY:
@@ -199,13 +297,18 @@ class MCTSAgent:
                 temp = copy.deepcopy(game)
                 try:
                     temp.current_player = enemy       # Set current player to enemy for win check
-                    temp.place_checker(row, col)  # Temporarily place enemy's piece
+                    temp.place_checker(row, col)      # Temporarily place enemy's piece
                 except ValueError:
                     continue  # Skip invalid placements
                 if temp.check_winner() == enemy:
-                    self.logger.info("FOUND A BLOCK")
-                    return [row, col]  
-                        
+                    self.logger.info(f"FOUND A BLOCK by placing at ({row}, {col})")
+                    validated_move = self.validate_move(game, [row, col], possible_moves)
+                    return validated_move  
+
+        # ============================== #
+        #            Beam MCTS            #
+        # ============================== #
+
         root = Node(copy.deepcopy(game), agent=self)
         beam = [root]
 
@@ -215,36 +318,43 @@ class MCTSAgent:
             new_beam = []
             for node in beam:
                 if not node.is_fully_expanded():
-                    # Expand the node
-                    children = node.expand()
-                    new_beam.extend(children)
+                    # Expand one child
+                    child = node.expand()
+                    if child:
+                        new_beam.append(child)
                 else:
                     # Select the best child based on UCT
                     best = node.best_child()
                     if best:
                         new_beam.append(best)
-            
+
             if not new_beam:
+                self.logger.debug("No new nodes to explore in the beam.")
                 break  # No nodes to explore
 
-            # Sort the new beam based on a heuristic (e.g., highest visit count)
+            # Sort the new beam based on visit counts or another heuristic
             new_beam.sort(key=lambda n: n.visits, reverse=True)
 
             # Keep only the top `beam_width` nodes
             beam = new_beam[:self.beam_width]
+            self.logger.debug(f"Beam updated with {len(beam)} nodes.")
 
             # Perform simulations for each node in the new beam
             for node in beam:
                 if node.game_state.current_player == EMPTY:
                     # Handle terminal node: backpropagate the known outcome
-                    winner = node.game_state.check_winner()  # Assuming `winner` attribute exists
+                    winner = node.game_state.check_winner()
                     self.backpropagate(node, winner)
                     self.logger.info(f"AFTER TERMINAL BACKPROPAGATE: Visits={node.visits}, Wins={node.wins}")
                     continue  # Skip simulation since the game is over
+
                 winner = self.simulate(node.game_state)
                 self.backpropagate(node, winner)
                 self.logger.info(f"AFTER MCTS SIM: Visits={node.visits}, Wins={node.wins}")
 
+        # ============================== #
+        #       Selecting the Best Move  #
+        # ============================== #
 
         # After Beam MCTS, select the move from the beam with the highest visits
         best_move = None
@@ -256,35 +366,43 @@ class MCTSAgent:
                 best_move = node.move
 
         if best_move:
-            # Validate the best move
-            current_pieces = game.p1_pieces if game.current_player == PLAYER1 else game.p2_pieces
-
-            if current_pieces <= 8:
-                if not game.is_valid_placement(best_move[0], best_move[1]):
-                    self.logger.info(f"MAX DEPTH: {self.max_simulation_depth}")
-                    return self.find_safe_move(game, possible_moves)  # Fallback to safe move
-
-            else:
-                print("number of pieces at call: ", game.p1_pieces, game.p2_pieces)
-                if not game.is_valid_move(*best_move):
-                    return self.find_safe_move(game, possible_moves)  # Fallback to safe move
-
-            # **Safety Check: Ensure the chosen move doesn't allow the enemy to win immediately**
-            if self.is_move_safe(game, best_move):
-                self.logger.info(f"CHOSE BEST MOVE: {best_move} with visits: {max_visits}")
-                return best_move
-            else:
-                self.logger.warning(f"Best move {best_move} is unsafe. Searching for a safe move.")
-                safe_move = self.find_safe_move(game, possible_moves)
-                if safe_move:
-                    self.logger.info(f"Selected safe move: {safe_move}")
-                    return safe_move
+            self.logger.debug(f"Best move selected: {best_move} with {max_visits} visits.")
+            # Validate the best move before returning
+            validated_move = self.validate_move(game, best_move, possible_moves)
+            if validated_move:
+                # **Safety Check: Ensure the chosen move doesn't allow the enemy to win immediately**
+                if self.is_move_safe(game, validated_move):
+                    self.logger.info(f"CHOSE BEST MOVE: {validated_move} with visits: {max_visits}")
+                    return validated_move
                 else:
-                    self.logger.info(f"No safe move found. Selecting a random move.")
-                    return random.choice(possible_moves)  # Fallback to random move
+                    self.logger.warning(f"Best move {validated_move} is unsafe. Searching for a safe move.")
+                    safe_move = self.find_safe_move(game, possible_moves)
+                    if safe_move:
+                        self.logger.info(f"Selected safe move: {safe_move}")
+                        return safe_move
+                    else:
+                        self.logger.info("No safe move found. Selecting a random move.")
+                        random_move = random.choice(possible_moves) if possible_moves else None
+                        return self.validate_move(game, random_move, possible_moves)
+            else:
+                self.logger.error("Validated move is None. Selecting a random move.")
+                random_move = random.choice(possible_moves) if possible_moves else None
+                return self.validate_move(game, random_move, possible_moves)
 
         # If no best_move found, select a safe random move
-        return self.find_safe_move(game, possible_moves)
+        self.logger.info("No best move found. Attempting to find a safe move.")
+        safe_move = self.find_safe_move(game, possible_moves)
+        if safe_move:
+            self.logger.info(f"Selected safe move: {safe_move}")
+            return self.validate_move(game, safe_move, possible_moves)
+        else:
+            self.logger.info("No safe move found. Selecting a random move.")
+            if possible_moves:
+                random_move = random.choice(possible_moves)
+                return self.validate_move(game, random_move, possible_moves)
+            else:
+                self.logger.error("No possible moves available to return.")
+                return None
 
     def find_safe_move(self, game, possible_moves):
         """
@@ -297,11 +415,12 @@ class MCTSAgent:
         Returns:
             list: A safe move as [row, col] or [r0, c0, r1, c1], else None.
         """
+        self.logger.debug("Attempting to find a safe move.")
         safe_moves = []
         for move in possible_moves:
             if self.is_move_safe(game, move):
                 safe_moves.append(move)
-        
+
         if safe_moves:
             selected_move = random.choice(safe_moves)
             self.logger.info(f"Selected safe move: {selected_move}")
@@ -321,20 +440,32 @@ class MCTSAgent:
         Returns:
             bool: True if the move is safe, False otherwise.
         """
+        self.logger.debug(f"Checking if move {move} is safe.")
         temp_game = copy.deepcopy(game)
         try:
             # Apply the move
-            if len(move) == 2:
+            if move == ['pass']:
+                if hasattr(temp_game, 'pass_turn'):
+                    temp_game.pass_turn()
+                else:
+                    self.logger.debug("Game does not support passing. Move is unsafe.")
+                    return False
+            elif len(move) == 2:
                 temp_game.place_checker(move[0], move[1])
             elif len(move) == 4:
                 temp_game.move_checker(*move)
+            else:
+                self.logger.debug(f"Unknown move format during safety check: {move}")
+                return False
             temp_game.turn_count += 1
 
             # Check for a win
             winner = temp_game.check_winner()
             if winner == self.player:
+                self.logger.debug("Move results in a win. It is safe.")
                 return True  # Winning move is safe
             elif winner == PLAYER1 or winner == PLAYER2:
+                self.logger.debug("Move results in a loss. It is unsafe.")
                 return False  # Move leads to a loss
             else:
                 # Switch to enemy's turn
@@ -342,13 +473,16 @@ class MCTSAgent:
 
                 # Check if enemy can win in their next move
                 enemy_wins = self.enemy_can_win_immediately(temp_game, self.player)
-                return not enemy_wins
+                is_safe = not enemy_wins
+                self.logger.debug(f"Move safety after enemy's response: {is_safe}")
+                return is_safe
         except ValueError as e:
-            self.logger.debug(f"Error applying move {move}: {e}")
+            self.logger.debug(f"Error applying move {move} during safety check: {e}")
             return False  # Invalid move is considered unsafe
 
     def backpropagate(self, node, winner):
         """Update the node and its ancestors with the simulation result."""
+        self.logger.debug(f"Backpropagating result: Winner={winner}")
         while node is not None:
             node.visits += 1
             if winner == self.player:
@@ -362,44 +496,69 @@ class MCTSAgent:
         """Simulates a random play-out from the current game state."""
         self.simulation_count += 1  # Increment simulation count
         current_depth = 0  # Initialize depth for this simulation
+        self.logger.debug("Starting simulation.")
         while True:
             winner = game.check_winner()
             if winner != EMPTY:
                 if current_depth > self.max_simulation_depth:
                     self.max_simulation_depth = current_depth
+                self.logger.debug(f"Simulation ended with winner: {winner}")
                 return winner
 
             possible_moves = self.get_possible_moves(game)
             if not possible_moves:
                 if current_depth > self.max_simulation_depth:
                     self.max_simulation_depth = current_depth
+                self.logger.debug("Simulation ended in a draw.")
                 return EMPTY  # Draw
 
             move = random.choice(possible_moves)
             self.apply_move(game, move)
             current_depth += 1
 
+            # **Invoke Blocking Logic During Simulation**
+            # This ensures that after every simulated move, we attempt to block any new threats
+            blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
+            if blocking_move:
+                self.logger.debug(f"Simulation: Blocking enemy threat by placing at {blocking_move}")
+                self.apply_move(game, blocking_move)
+
     def apply_move(self, game, move):
         """Applies a move to the game state."""
-        if len(move) == 2:
-            r, c = move
-            game.place_checker(r, c)
-        elif len(move) == 4:
-            r0, c0, r1, c1 = move
-            game.move_checker(r0, c0, r1, c1)
-        game.turn_count += 1
-        # Check for a win
-        winner = game.check_winner()
-        if winner != EMPTY:
-            game.current_player = EMPTY  # No further moves
-        else:
-            game.current_player *= -1    # Switch player
+        try:
+            if move == ['pass']:
+                if hasattr(game, 'pass_turn'):
+                    game.pass_turn()
+                else:
+                    raise ValueError("Game does not support passing.")
+            elif len(move) == 2:
+                r, c = move
+                game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                game.move_checker(r0, c0, r1, c1)
+            else:
+                raise ValueError(f"Unknown move format: {move}")
+            game.turn_count += 1
+            # Check for a win
+            winner = game.check_winner()
+            if winner != EMPTY:
+                game.current_player = EMPTY  # No further moves
+            else:
+                game.current_player *= -1    # Switch player
+            self.logger.debug(f"Applied move {move}. Current player is now {game.current_player}.")
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move}: {e}")
+            raise
 
+    # ============================== #
+    #        Blocking Logic          #
+    # ============================== #
 
-    ## REFACTORED CHECKS
     def check_and_block_enemy_threats(self, game, threat_length=2):
         """
-        Generalized method to check and block enemy threats in all directions.
+        Generalized method to check and block enemy threats in all directions,
+        including threats that wrap around the grid edges.
 
         Args:
             game (Game): The current game state.
@@ -408,6 +567,7 @@ class MCTSAgent:
         Returns:
             move (list): [row, col] if a blocking move is found, else None.
         """
+        self.logger.debug("Checking and attempting to block enemy threats.")
         enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
         directions = [
             (0, 1),   # Horizontal
@@ -419,9 +579,9 @@ class MCTSAgent:
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
                 for dr, dc in directions:
-                    threat = self.detect_threat(game, r, c, dr, dc, enemy, threat_length)
-                    if threat:
-                        blocking_move = self.select_blocking_move(game, threat, enemy)
+                    threat_blocking_positions = self.detect_threat(game, r, c, dr, dc, enemy, threat_length)
+                    if threat_blocking_positions:
+                        blocking_move = self.select_blocking_move(game, threat_blocking_positions, enemy)
                         if blocking_move:
                             self.logger.debug(f"Blocking enemy threat by placing at {blocking_move} in direction ({dr}, {dc})")
                             return blocking_move
@@ -429,7 +589,8 @@ class MCTSAgent:
 
     def detect_threat(self, game, start_r, start_c, dr, dc, enemy, threat_length):
         """
-        Detects if there's a threat starting from (start_r, start_c) in the direction (dr, dc).
+        Detects if there's a threat starting from (start_r, start_c) in the direction (dr, dc),
+        considering wrap-around if necessary.
 
         Args:
             game (Game): The current game state.
@@ -445,39 +606,35 @@ class MCTSAgent:
         """
         threat_positions = []
         for i in range(threat_length):
-            r = start_r + i * dr
-            c = start_c + i * dc
-            if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
-                if game.board[r][c] == enemy:
-                    threat_positions.append((r, c))
-                else:
-                    break
+            r = (start_r + i * dr) % BOARD_SIZE
+            c = (start_c + i * dc) % BOARD_SIZE
+            if game.board[r][c] == enemy:
+                threat_positions.append((r, c))
             else:
                 break
 
         if len(threat_positions) == threat_length:
             # Check for possible blocking positions before and after the threat
-            before_r = start_r - dr
-            before_c = start_c - dc
-            after_r = start_r + threat_length * dr
-            after_c = start_c + threat_length * dc
+            before_r = (start_r - dr) % BOARD_SIZE
+            before_c = (start_c - dc) % BOARD_SIZE
+            after_r = (start_r + threat_length * dr) % BOARD_SIZE
+            after_c = (start_c + threat_length * dc) % BOARD_SIZE
             blocking_positions = []
-            
-            if 0 <= before_r < BOARD_SIZE and 0 <= before_c < BOARD_SIZE:
-                if game.board[before_r][before_c] == EMPTY:
-                    blocking_positions.append((before_r, before_c))
-            
-            if 0 <= after_r < BOARD_SIZE and 0 <= after_c < BOARD_SIZE:
-                if game.board[after_r][after_c] == EMPTY:
-                    blocking_positions.append((after_r, after_c))
-            
+
+            if game.board[before_r][before_c] == EMPTY:
+                blocking_positions.append((before_r, before_c))
+
+            if game.board[after_r][after_c] == EMPTY:
+                blocking_positions.append((after_r, after_c))
+
             if blocking_positions:
                 return blocking_positions
         return None
 
     def select_blocking_move(self, game, threat_blocking_positions, enemy):
         """
-        Selects a blocking move from the available blocking positions.
+        Selects a blocking move from the available blocking positions,
+        ensuring that the move is valid and effective.
 
         Args:
             game (Game): The current game state.
@@ -487,6 +644,7 @@ class MCTSAgent:
         Returns:
             list: [row, col] of the blocking move, else None.
         """
+        self.logger.debug("Selecting a blocking move from potential blocking positions.")
         for move in threat_blocking_positions:
             r, c = move
             if game.is_valid_placement(r, c):
@@ -506,6 +664,7 @@ class MCTSAgent:
         Returns:
             bool: True if the blocking move effectively prevents the enemy from winning immediately, else False.
         """
+        self.logger.debug(f"Checking if blocking move {move} is effective.")
         # Simulate the blocking move
         temp_game = copy.deepcopy(game)
         try:
@@ -516,7 +675,9 @@ class MCTSAgent:
 
         # Check if the enemy can still win immediately after the block
         enemy_wins = self.enemy_can_win_immediately(temp_game, enemy)
-        return not enemy_wins
+        is_effective = not enemy_wins
+        self.logger.debug(f"Blocking move effectiveness: {is_effective}")
+        return is_effective
 
     def enemy_can_win_immediately(self, game, enemy):
         """
@@ -529,6 +690,7 @@ class MCTSAgent:
         Returns:
             bool: True if the enemy can win immediately, False otherwise.
         """
+        self.logger.debug("Checking if the enemy can win immediately after the block.")
         # Temporarily switch to the enemy's turn
         temp_game = copy.deepcopy(game)
         temp_game.current_player = enemy
@@ -540,7 +702,12 @@ class MCTSAgent:
         for move in enemy_moves:
             temp_move_game = copy.deepcopy(temp_game)
             try:
-                if len(move) == 2:
+                if move == ['pass']:
+                    if hasattr(temp_move_game, 'pass_turn'):
+                        temp_move_game.pass_turn()
+                    else:
+                        continue  # Skip if pass is not supported
+                elif len(move) == 2:
                     temp_move_game.place_checker(move[0], move[1])
                 elif len(move) == 4:
                     temp_move_game.move_checker(*move)
@@ -550,6 +717,134 @@ class MCTSAgent:
                 continue  # Skip invalid moves
 
             if temp_move_game.check_winner() == enemy:
+                self.logger.debug(f"Enemy can win immediately with move: {move}")
                 return True  # Enemy can win immediately
 
+        self.logger.debug("Enemy cannot win immediately after the block.")
         return False  # Enemy cannot win immediately
+
+    # ============================== #
+    #       Additional Methods       #
+    # ============================== #
+
+    def find_safe_move(self, game, possible_moves):
+        """
+        Attempts to find a safe move from the list of possible moves.
+
+        Args:
+            game (Game): The current game state.
+            possible_moves (list): List of possible moves.
+
+        Returns:
+            list: A safe move as [row, col] or [r0, c0, r1, c1], else None.
+        """
+        self.logger.debug("Attempting to find a safe move.")
+        safe_moves = []
+        for move in possible_moves:
+            if self.is_move_safe(game, move):
+                safe_moves.append(move)
+
+        if safe_moves:
+            selected_move = random.choice(safe_moves)
+            self.logger.info(f"Selected safe move: {selected_move}")
+            return selected_move
+        else:
+            self.logger.warning("No safe moves available.")
+            return None
+
+    # ============================== #
+    #         Safety Checks          #
+    # ============================== #
+
+    def is_move_safe(self, game, move):
+        """
+        Checks if making the given move will not allow the enemy to win immediately.
+
+        Args:
+            game (Game): The current game state.
+            move (tuple): The move to be checked.
+
+        Returns:
+            bool: True if the move is safe, False otherwise.
+        """
+        self.logger.debug(f"Checking if move {move} is safe.")
+        temp_game = copy.deepcopy(game)
+        try:
+            # Apply the move
+            if move == ['pass']:
+                if hasattr(temp_game, 'pass_turn'):
+                    temp_game.pass_turn()
+                else:
+                    self.logger.debug("Game does not support passing. Move is unsafe.")
+                    return False
+            elif len(move) == 2:
+                temp_game.place_checker(move[0], move[1])
+            elif len(move) == 4:
+                temp_game.move_checker(*move)
+            else:
+                self.logger.debug(f"Unknown move format during safety check: {move}")
+                return False
+            temp_game.turn_count += 1
+
+            # Check for a win
+            winner = temp_game.check_winner()
+            if winner == self.player:
+                self.logger.debug("Move results in a win. It is safe.")
+                return True  # Winning move is safe
+            elif winner == PLAYER1 or winner == PLAYER2:
+                self.logger.debug("Move results in a loss. It is unsafe.")
+                return False  # Move leads to a loss
+            else:
+                # Switch to enemy's turn
+                temp_game.current_player = PLAYER2 if self.player == PLAYER1 else PLAYER1
+
+                # Check if enemy can win in their next move
+                enemy_wins = self.enemy_can_win_immediately(temp_game, self.player)
+                is_safe = not enemy_wins
+                self.logger.debug(f"Move safety after enemy's response: {is_safe}")
+                return is_safe
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move} during safety check: {e}")
+            return False  # Invalid move is considered unsafe
+
+    # ============================== #
+    #         Simulation Steps       #
+    # ============================== #
+
+    def simulate(self, game):
+        """Simulates a random play-out from the current game state."""
+        self.simulation_count += 1  # Increment simulation count
+        current_depth = 0  # Initialize depth for this simulation
+        self.logger.debug("Starting simulation.")
+        while True:
+            winner = game.check_winner()
+            if winner != EMPTY:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug(f"Simulation ended with winner: {winner}")
+                return winner
+
+            possible_moves = self.get_possible_moves(game)
+            if not possible_moves:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug("Simulation ended in a draw.")
+                return EMPTY  # Draw
+
+            move = random.choice(possible_moves)
+            self.apply_move(game, move)
+            current_depth += 1
+
+            # **Invoke Blocking Logic During Simulation**
+            # This ensures that after every simulated move, we attempt to block any new threats
+            blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
+            if blocking_move:
+                self.logger.debug(f"Simulation: Blocking enemy threat by placing at {blocking_move}")
+                self.apply_move(game, blocking_move)
+
+    # ============================== #
+    #       Threat Detection         #
+    # ============================== #
+
+    # (Already defined above in Blocking Logic)
+

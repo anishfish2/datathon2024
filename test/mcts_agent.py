@@ -87,7 +87,7 @@ class Node:
                 next_state.place_checker(r, c)
             elif len(move) == 4:
                 r0, c0, r1, c1 = move
-                if not next_state.is_valid_move(*move):
+                if not next_state.is_valid_move(r0, c0, r1, c1):
                     self.agent.logger.debug(f"Invalid movement move during expansion: {move}")
                     return self.expand()  # Try expanding another move
                 next_state.move_checker(r0, c0, r1, c1)
@@ -145,6 +145,7 @@ class Node:
         best_index = visits.index(max(visits))
         return self.children[best_index]
 
+
 # ============================== #
 #         MCTS Agent Class       #
 # ============================== #
@@ -152,8 +153,8 @@ class Node:
 class MCTSAgent:
     def __init__(self, player=PLAYER1):
         self.player = player
-        self.time_limit = 2  # Time limit per move in seconds
-        self.beam_width = 16  # Beam width for Beam MCTS
+        self.time_limit = 1  # Time limit per move in seconds
+        self.beam_width = 5  # Beam width for Beam MCTS
         self.max_simulation_depth = 0
 
         # Assign the appropriate logger based on the player
@@ -163,18 +164,33 @@ class MCTSAgent:
             self.logger = player2_logger
 
     def get_possible_moves(self, game):
-        """Returns list of all possible moves in current state."""
+        """
+        Returns list of all possible moves in current state.
+        Before 16 moves, includes both placement and movement actions.
+        After 16 moves, includes only movement actions.
+        """
         moves = []
         current_pieces = game.p1_pieces if game.current_player == PLAYER1 else game.p2_pieces
 
-        if current_pieces < NUM_PIECES:
-            # Placement moves
-            for r in range(BOARD_SIZE):
-                for c in range(BOARD_SIZE):
-                    if game.is_valid_placement(r, c):
-                        moves.append((r, c))
+        if game.turn_count < 16:
+            # Before 16 moves: Both placement and movement actions
+            if current_pieces < NUM_PIECES:
+                # Placement moves
+                for r in range(BOARD_SIZE):
+                    for c in range(BOARD_SIZE):
+                        if game.is_valid_placement(r, c):
+                            moves.append((r, c))
+            else:
+                # Movement moves
+                for r0 in range(BOARD_SIZE):
+                    for c0 in range(BOARD_SIZE):
+                        if game.board[r0][c0] == game.current_player:
+                            for r1 in range(BOARD_SIZE):
+                                for c1 in range(BOARD_SIZE):
+                                    if game.is_valid_move(r0, c0, r1, c1):
+                                        moves.append((r0, c0, r1, c1))
         else:
-            # Movement moves
+            # After 16 moves: Only movement actions
             for r0 in range(BOARD_SIZE):
                 for c0 in range(BOARD_SIZE):
                     if game.board[r0][c0] == game.current_player:
@@ -182,6 +198,7 @@ class MCTSAgent:
                             for c1 in range(BOARD_SIZE):
                                 if game.is_valid_move(r0, c0, r1, c1):
                                     moves.append((r0, c0, r1, c1))
+
         self.logger.debug(f"Possible moves generated: {len(moves)} moves")
         return moves
 
@@ -232,7 +249,7 @@ class MCTSAgent:
             if len(move) == 2:
                 return game.is_valid_placement(move[0], move[1])
             elif len(move) == 4:
-                return game.is_valid_move(*move)
+                return game.is_valid_move(move[0], move[1], move[2], move[3])
             else:
                 return False
         except:
@@ -240,7 +257,7 @@ class MCTSAgent:
 
     def get_best_move(self, game):
         """
-        Determines the best move using Beam MCTS, incorporating blocking logic.
+        Determines the best move using Beam MCTS, incorporating blocking logic and special move selection after 16 moves.
 
         Args:
             game (Game): The current game state.
@@ -253,29 +270,28 @@ class MCTSAgent:
         self.max_simulation_depth = 0
         possible_moves = self.get_possible_moves(game)
 
-        current_pieces = game.p1_pieces if game.current_player == PLAYER1 else game.p2_pieces
         enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
 
         # ============================== #
         #        Immediate Win Check     #
         # ============================== #
 
-        if current_pieces < NUM_PIECES:
+        if game.turn_count < 16 and (game.p1_pieces < NUM_PIECES if game.current_player == PLAYER1 else game.p2_pieces < NUM_PIECES):
             self.logger.debug("Player is still placing pieces.")
             # Check for a winning move by placing a piece
-            for row in range(BOARD_SIZE):
-                for col in range(BOARD_SIZE):
-                    if game.board[row][col] != EMPTY:
-                        continue
-                    temp = copy.deepcopy(game)
-                    try:
-                        temp.place_checker(row, col)  # Use the method instead of direct assignment
-                    except ValueError:
-                        continue  # Skip invalid placements
-                    if temp.check_winner() == self.player:
-                        self.logger.info(f"FOUND A WINNER by placing at ({row}, {col})")
-                        validated_move = self.validate_move(game, [row, col], possible_moves)
-                        return validated_move
+            for move in possible_moves:
+                if len(move) != 2:
+                    continue  # Only placement moves
+                r, c = move
+                temp = copy.deepcopy(game)
+                try:
+                    temp.place_checker(r, c)  # Use the method instead of direct assignment
+                except ValueError:
+                    continue  # Skip invalid placements
+                if temp.check_winner() == self.player:
+                    self.logger.info(f"FOUND A WINNER by placing at ({r}, {c})")
+                    validated_move = self.validate_move(game, [r, c], possible_moves)
+                    return validated_move
 
         # ============================== #
         #      Blocking Enemy Threats    #
@@ -284,26 +300,69 @@ class MCTSAgent:
         # Generalized Threat Checks with Wrap-Around
         blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
         if blocking_move:
-            self.logger.debug(f"Blocking enemy threat by placing at {blocking_move}")
-            self.logger.info(f"Blocking enemy threat by placing at {blocking_move}")
+            self.logger.debug(f"Blocking enemy threat by placing/moving at {blocking_move}")
+            self.logger.info(f"Blocking enemy threat by placing/moving at {blocking_move}")
             validated_move = self.validate_move(game, blocking_move, possible_moves)
             return validated_move
 
         # Specific Block: Check if enemy can win immediately and block
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
-                if game.board[row][col] != EMPTY:
-                    continue
+        for move in possible_moves:
+            if len(move) != 2 and len(move) != 4:
+                continue  # Only placement or movement moves
+            if len(move) == 2:
+                r, c = move
                 temp = copy.deepcopy(game)
                 try:
                     temp.current_player = enemy       # Set current player to enemy for win check
-                    temp.place_checker(row, col)      # Temporarily place enemy's piece
+                    temp.place_checker(r, c)          # Temporarily place enemy's piece
                 except ValueError:
                     continue  # Skip invalid placements
                 if temp.check_winner() == enemy:
-                    self.logger.info(f"FOUND A BLOCK by placing at ({row}, {col})")
-                    validated_move = self.validate_move(game, [row, col], possible_moves)
+                    self.logger.info(f"FOUND A BLOCK by placing at ({r}, {c})")
+                    validated_move = self.validate_move(game, [r, c], possible_moves)
+                    return validated_move
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp = copy.deepcopy(game)
+                try:
+                    temp.current_player = enemy
+                    temp.move_checker(r0, c0, r1, c1)  # Temporarily move enemy's piece
+                except ValueError:
+                    continue  # Skip invalid movements
+                if temp.check_winner() == enemy:
+                    self.logger.info(f"FOUND A BLOCK by moving from ({r0}, {c0}) to ({r1}, {c1})")
+                    validated_move = self.validate_move(game, move, possible_moves)
                     return validated_move  
+
+        # ============================== #
+        #      Special Move Selection     #
+        # ============================== #
+
+        # If it has been 16 moves (both players have made 8 moves), perform special move selection
+        if game.turn_count >= 16:
+            self.logger.debug("Turn count >=16. Performing special move selection.")
+            special_move = self.perform_special_move_selection(game, possible_moves)
+            if special_move:
+                validated_move = self.validate_move(game, special_move, possible_moves)
+                if validated_move:
+                    # **Safety Check: Ensure the chosen move doesn't allow the enemy to win immediately**
+                    if self.is_move_safe(game, validated_move):
+                        self.logger.info(f"CHOSE SPECIAL MOVE: {validated_move}")
+                        return validated_move
+                    else:
+                        self.logger.warning(f"Special move {validated_move} is unsafe. Searching for a safe move.")
+                        safe_move = self.find_safe_move(game, possible_moves)
+                        if safe_move:
+                            self.logger.info(f"Selected safe move: {safe_move}")
+                            return safe_move
+                        else:
+                            self.logger.info("No safe move found. Selecting a random move.")
+                            random_move = random.choice(possible_moves) if possible_moves else None
+                            return self.validate_move(game, random_move, possible_moves)
+                else:
+                    self.logger.error("Validated special move is None. Selecting a random move.")
+                    random_move = random.choice(possible_moves) if possible_moves else None
+                    return self.validate_move(game, random_move, possible_moves)
 
         # ============================== #
         #            Beam MCTS            #
@@ -404,152 +463,113 @@ class MCTSAgent:
                 self.logger.error("No possible moves available to return.")
                 return None
 
-    def find_safe_move(self, game, possible_moves):
+    def perform_special_move_selection(self, game, possible_moves):
         """
-        Attempts to find a safe move from the list of possible moves.
+        After 16 moves, pick a random piece that is not blocking anything and move it somewhere else.
 
         Args:
             game (Game): The current game state.
-            possible_moves (list): List of possible moves.
+            possible_moves (list): List of all possible valid moves.
 
         Returns:
-            list: A safe move as [row, col] or [r0, c0, r1, c1], else None.
+            tuple or list: The selected special move, else None.
         """
-        self.logger.debug("Attempting to find a safe move.")
-        safe_moves = []
-        for move in possible_moves:
-            if self.is_move_safe(game, move):
-                safe_moves.append(move)
+        self.logger.debug("Performing special move selection after 16 moves.")
+        non_blocking_pieces = self.get_non_blocking_pieces(game)
 
-        if safe_moves:
-            selected_move = random.choice(safe_moves)
-            self.logger.info(f"Selected safe move: {selected_move}")
-            return selected_move
-        else:
-            self.logger.warning("No safe moves available.")
+        if not non_blocking_pieces:
+            self.logger.warning("No non-blocking pieces available for special move selection.")
             return None
 
-    def is_move_safe(self, game, move):
+        # Select a random non-blocking piece
+        selected_piece = random.choice(non_blocking_pieces)
+        self.logger.info(f"Selected non-blocking piece at ({selected_piece[0]}, {selected_piece[1]}) for special move.")
+
+        # Find all possible movement moves for the selected piece
+        piece_moves = []
+        for move in possible_moves:
+            if len(move) != 4:
+                continue  # Only movement moves
+            r0, c0, r1, c1 = move
+            if (r0, c0) == selected_piece:
+                piece_moves.append(move)
+
+        if not piece_moves:
+            self.logger.warning(f"No valid movement moves available for the selected piece at ({selected_piece[0]}, {selected_piece[1]}).")
+            return None
+
+        # Select a random movement move for the selected piece
+        selected_move = random.choice(piece_moves)
+        self.logger.info(f"Selected special movement move: {selected_move}")
+        return selected_move
+
+    def get_non_blocking_pieces(self, game):
         """
-        Checks if making the given move will not allow the enemy to win immediately.
+        Identifies all pieces that are not currently blocking any immediate threats from the enemy.
 
         Args:
             game (Game): The current game state.
-            move (tuple): The move to be checked.
 
         Returns:
-            bool: True if the move is safe, False otherwise.
+            list of tuples: List of positions (row, col) of non-blocking pieces.
         """
-        self.logger.debug(f"Checking if move {move} is safe.")
-        temp_game = copy.deepcopy(game)
-        try:
-            # Apply the move
-            if move == ['pass']:
-                if hasattr(temp_game, 'pass_turn'):
-                    temp_game.pass_turn()
-                else:
-                    self.logger.debug("Game does not support passing. Move is unsafe.")
-                    return False
-            elif len(move) == 2:
-                temp_game.place_checker(move[0], move[1])
-            elif len(move) == 4:
-                temp_game.move_checker(*move)
-            else:
-                self.logger.debug(f"Unknown move format during safety check: {move}")
-                return False
-            temp_game.turn_count += 1
+        self.logger.debug("Identifying non-blocking pieces.")
+        non_blocking_pieces = []
+        enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
+        enemy_threats = self.detect_enemy_threats(game, enemy, threat_length=2)
 
-            # Check for a win
-            winner = temp_game.check_winner()
-            if winner == self.player:
-                self.logger.debug("Move results in a win. It is safe.")
-                return True  # Winning move is safe
-            elif winner == PLAYER1 or winner == PLAYER2:
-                self.logger.debug("Move results in a loss. It is unsafe.")
-                return False  # Move leads to a loss
-            else:
-                # Switch to enemy's turn
-                temp_game.current_player = PLAYER2 if self.player == PLAYER1 else PLAYER1
+        # Flatten the list of threat positions
+        threat_positions = set()
+        for threat in enemy_threats:
+            threat_positions.update(threat)
 
-                # Check if enemy can win in their next move
-                enemy_wins = self.enemy_can_win_immediately(temp_game, self.player)
-                is_safe = not enemy_wins
-                self.logger.debug(f"Move safety after enemy's response: {is_safe}")
-                return is_safe
-        except ValueError as e:
-            self.logger.debug(f"Error applying move {move} during safety check: {e}")
-            return False  # Invalid move is considered unsafe
+        # Iterate over all of player's pieces
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                if game.board[r][c] != self.player:
+                    continue
+                if (r, c) not in threat_positions:
+                    non_blocking_pieces.append((r, c))
 
-    def backpropagate(self, node, winner):
-        """Update the node and its ancestors with the simulation result."""
-        self.logger.debug(f"Backpropagating result: Winner={winner}")
-        while node is not None:
-            node.visits += 1
-            if winner == self.player:
-                node.wins += 1
-            elif winner == -self.player:
-                node.wins -= 1
-            # Optionally, handle draws or neutral outcomes here
-            node = node.parent
+        self.logger.debug(f"Non-blocking pieces identified: {non_blocking_pieces}")
+        return non_blocking_pieces
 
-    def simulate(self, game):
-        """Simulates a random play-out from the current game state."""
-        self.simulation_count += 1  # Increment simulation count
-        current_depth = 0  # Initialize depth for this simulation
-        self.logger.debug("Starting simulation.")
-        while True:
-            winner = game.check_winner()
-            if winner != EMPTY:
-                if current_depth > self.max_simulation_depth:
-                    self.max_simulation_depth = current_depth
-                self.logger.debug(f"Simulation ended with winner: {winner}")
-                return winner
+    def detect_enemy_threats(self, game, enemy, threat_length):
+        """
+        Detects all enemy threats of a specified length.
 
-            possible_moves = self.get_possible_moves(game)
-            if not possible_moves:
-                if current_depth > self.max_simulation_depth:
-                    self.max_simulation_depth = current_depth
-                self.logger.debug("Simulation ended in a draw.")
-                return EMPTY  # Draw
+        Args:
+            game (Game): The current game state.
+            enemy (int): Enemy player identifier.
+            threat_length (int): Number of consecutive enemy pieces that constitute a threat.
 
-            move = random.choice(possible_moves)
-            self.apply_move(game, move)
-            current_depth += 1
+        Returns:
+            list of lists: Each inner list contains positions (row, col) that form a threat.
+        """
+        self.logger.debug("Detecting enemy threats.")
+        threats = []
+        directions = [
+            (0, 1),   # Horizontal
+            (1, 0),   # Vertical
+            (1, 1),   # Diagonal down-right
+            (1, -1)   # Diagonal down-left
+        ]
 
-            # **Invoke Blocking Logic During Simulation**
-            # This ensures that after every simulated move, we attempt to block any new threats
-            blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
-            if blocking_move:
-                self.logger.debug(f"Simulation: Blocking enemy threat by placing at {blocking_move}")
-                self.apply_move(game, blocking_move)
-
-    def apply_move(self, game, move):
-        """Applies a move to the game state."""
-        try:
-            if move == ['pass']:
-                if hasattr(game, 'pass_turn'):
-                    game.pass_turn()
-                else:
-                    raise ValueError("Game does not support passing.")
-            elif len(move) == 2:
-                r, c = move
-                game.place_checker(r, c)
-            elif len(move) == 4:
-                r0, c0, r1, c1 = move
-                game.move_checker(r0, c0, r1, c1)
-            else:
-                raise ValueError(f"Unknown move format: {move}")
-            game.turn_count += 1
-            # Check for a win
-            winner = game.check_winner()
-            if winner != EMPTY:
-                game.current_player = EMPTY  # No further moves
-            else:
-                game.current_player *= -1    # Switch player
-            self.logger.debug(f"Applied move {move}. Current player is now {game.current_player}.")
-        except ValueError as e:
-            self.logger.debug(f"Error applying move {move}: {e}")
-            raise
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                for dr, dc in directions:
+                    threat = []
+                    for i in range(threat_length):
+                        nr = (r + i * dr) % BOARD_SIZE
+                        nc = (c + i * dc) % BOARD_SIZE
+                        if game.board[nr][nc] == enemy:
+                            threat.append((nr, nc))
+                        else:
+                            break
+                    if len(threat) == threat_length:
+                        threats.append(threat)
+        self.logger.debug(f"Enemy threats detected: {threats}")
+        return threats
 
     # ============================== #
     #        Blocking Logic          #
@@ -565,7 +585,7 @@ class MCTSAgent:
             threat_length (int): Number of consecutive enemy pieces that constitute a threat.
 
         Returns:
-            move (list): [row, col] if a blocking move is found, else None.
+            move (list or tuple): [row, col] or [r0, c0, r1, c1] if a blocking move is found, else None.
         """
         self.logger.debug("Checking and attempting to block enemy threats.")
         enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
@@ -583,7 +603,7 @@ class MCTSAgent:
                     if threat_blocking_positions:
                         blocking_move = self.select_blocking_move(game, threat_blocking_positions, enemy)
                         if blocking_move:
-                            self.logger.debug(f"Blocking enemy threat by placing at {blocking_move} in direction ({dr}, {dc})")
+                            self.logger.debug(f"Blocking enemy threat by placing/moving at {blocking_move} in direction ({dr}, {dc})")
                             return blocking_move
         return None
 
@@ -621,11 +641,22 @@ class MCTSAgent:
             after_c = (start_c + threat_length * dc) % BOARD_SIZE
             blocking_positions = []
 
-            if game.board[before_r][before_c] == EMPTY:
-                blocking_positions.append((before_r, before_c))
-
-            if game.board[after_r][after_c] == EMPTY:
-                blocking_positions.append((after_r, after_c))
+            # Determine if the agent needs to place or move to block
+            if game.turn_count < 16:
+                # Before 16 moves: Blocking by placement
+                if game.is_valid_placement(before_r, before_c):
+                    blocking_positions.append((before_r, before_c))
+                if game.is_valid_placement(after_r, after_c):
+                    blocking_positions.append((after_r, after_c))
+            else:
+                # After 16 moves: Blocking by movement
+                # Find moves that can place a piece at blocking positions
+                for move in possible_moves:
+                    if len(move) != 4:
+                        continue  # Only movement moves
+                    r0, c0, r1, c1 = move
+                    if (r1, c1) in [(before_r, before_c), (after_r, after_c)]:
+                        blocking_positions.append(move)
 
             if blocking_positions:
                 return blocking_positions
@@ -638,27 +669,35 @@ class MCTSAgent:
 
         Args:
             game (Game): The current game state.
-            threat_blocking_positions (list): List of blocking positions.
+            threat_blocking_positions (list): List of blocking positions or movement moves.
             enemy (int): Enemy player identifier.
 
         Returns:
-            list: [row, col] of the blocking move, else None.
+            list or tuple: [row, col] or [r0, c0, r1, c1] of the blocking move, else None.
         """
         self.logger.debug("Selecting a blocking move from potential blocking positions.")
         for move in threat_blocking_positions:
-            r, c = move
-            if game.is_valid_placement(r, c):
-                if self.is_block_effective(game, move, enemy):
-                    return list(move)
+            if len(move) == 2:
+                # Blocking by placement
+                r, c = move
+                if game.is_valid_placement(r, c):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
+            elif len(move) == 4:
+                # Blocking by movement
+                r0, c0, r1, c1 = move
+                if game.is_valid_move(r0, c0, r1, c1):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
         return None
 
     def is_block_effective(self, game, move, enemy):
         """
-        Simulates placing a blocking move and checks if the enemy can still win immediately.
+        Simulates placing/moving a blocking move and checks if the enemy can still win immediately.
 
         Args:
             game (Game): The current game state.
-            move (tuple): The blocking move as (row, col).
+            move (tuple): The blocking move as (row, col) or (r0, c0, r1, c1).
             enemy (int): The enemy player's identifier.
 
         Returns:
@@ -668,10 +707,20 @@ class MCTSAgent:
         # Simulate the blocking move
         temp_game = copy.deepcopy(game)
         try:
-            temp_game.place_checker(move[0], move[1])
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
+            else:
+                self.logger.debug(f"Unknown move format during blocking effectiveness check: {move}")
+                return False
         except ValueError as e:
-            self.logger.debug(f"Error placing blocker at {move}: {e}")
+            self.logger.debug(f"Error applying blocking move {move}: {e}")
             return False  # Invalid move, cannot be effective
+
+        temp_game.turn_count += 1
 
         # Check if the enemy can still win immediately after the block
         enemy_wins = self.enemy_can_win_immediately(temp_game, enemy)
@@ -702,15 +751,10 @@ class MCTSAgent:
         for move in enemy_moves:
             temp_move_game = copy.deepcopy(temp_game)
             try:
-                if move == ['pass']:
-                    if hasattr(temp_move_game, 'pass_turn'):
-                        temp_move_game.pass_turn()
-                    else:
-                        continue  # Skip if pass is not supported
-                elif len(move) == 2:
+                if len(move) == 2:
                     temp_move_game.place_checker(move[0], move[1])
                 elif len(move) == 4:
-                    temp_move_game.move_checker(*move)
+                    temp_move_game.move_checker(move[0], move[1], move[2], move[3])
                 else:
                     continue  # Invalid move format
             except ValueError:
@@ -724,7 +768,51 @@ class MCTSAgent:
         return False  # Enemy cannot win immediately
 
     # ============================== #
-    #       Additional Methods       #
+    #      Special Move Logic        #
+    # ============================== #
+
+    def perform_special_move_selection(self, game, possible_moves):
+        """
+        After 16 moves, pick a random piece that is not blocking anything and move it somewhere else.
+
+        Args:
+            game (Game): The current game state.
+            possible_moves (list): List of all possible valid moves.
+
+        Returns:
+            tuple or list: The selected special move, else None.
+        """
+        self.logger.debug("Performing special move selection after 16 moves.")
+        non_blocking_pieces = self.get_non_blocking_pieces(game)
+
+        if not non_blocking_pieces:
+            self.logger.warning("No non-blocking pieces available for special move selection.")
+            return None
+
+        # Select a random non-blocking piece
+        selected_piece = random.choice(non_blocking_pieces)
+        self.logger.info(f"Selected non-blocking piece at ({selected_piece[0]}, {selected_piece[1]}) for special move.")
+
+        # Find all possible movement moves for the selected piece
+        piece_moves = []
+        for move in possible_moves:
+            if len(move) != 4:
+                continue  # Only movement moves
+            r0, c0, r1, c1 = move
+            if (r0, c0) == selected_piece:
+                piece_moves.append(move)
+
+        if not piece_moves:
+            self.logger.warning(f"No valid movement moves available for the selected piece at ({selected_piece[0]}, {selected_piece[1]}).")
+            return None
+
+        # Select a random movement move for the selected piece
+        selected_move = random.choice(piece_moves)
+        self.logger.info(f"Selected special movement move: {selected_move}")
+        return selected_move
+
+    # ============================== #
+    #      Helper Functions          #
     # ============================== #
 
     def find_safe_move(self, game, possible_moves):
@@ -771,16 +859,12 @@ class MCTSAgent:
         temp_game = copy.deepcopy(game)
         try:
             # Apply the move
-            if move == ['pass']:
-                if hasattr(temp_game, 'pass_turn'):
-                    temp_game.pass_turn()
-                else:
-                    self.logger.debug("Game does not support passing. Move is unsafe.")
-                    return False
-            elif len(move) == 2:
-                temp_game.place_checker(move[0], move[1])
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
             elif len(move) == 4:
-                temp_game.move_checker(*move)
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
             else:
                 self.logger.debug(f"Unknown move format during safety check: {move}")
                 return False
@@ -811,6 +895,18 @@ class MCTSAgent:
     #         Simulation Steps       #
     # ============================== #
 
+    def backpropagate(self, node, winner):
+        """Update the node and its ancestors with the simulation result."""
+        self.logger.debug(f"Backpropagating result: Winner={winner}")
+        while node is not None:
+            node.visits += 1
+            if winner == self.player:
+                node.wins += 1
+            elif winner == -self.player:
+                node.wins -= 1
+            # Optionally, handle draws or neutral outcomes here
+            node = node.parent
+
     def simulate(self, game):
         """Simulates a random play-out from the current game state."""
         self.simulation_count += 1  # Increment simulation count
@@ -839,12 +935,698 @@ class MCTSAgent:
             # This ensures that after every simulated move, we attempt to block any new threats
             blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
             if blocking_move:
-                self.logger.debug(f"Simulation: Blocking enemy threat by placing at {blocking_move}")
+                self.logger.debug(f"Simulation: Blocking enemy threat by placing/moving at {blocking_move}")
                 self.apply_move(game, blocking_move)
 
+    def apply_move(self, game, move):
+        """Applies a move to the game state."""
+        try:
+            if len(move) == 2:
+                r, c = move
+                game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                game.move_checker(r0, c0, r1, c1)
+            else:
+                raise ValueError(f"Unknown move format: {move}")
+            game.turn_count += 1
+            # Check for a win
+            winner = game.check_winner()
+            if winner != EMPTY:
+                game.current_player = EMPTY  # No further moves
+            else:
+                game.current_player *= -1    # Switch player
+            self.logger.debug(f"Applied move {move}. Current player is now {game.current_player}.")
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move}: {e}")
+            raise
+
     # ============================== #
-    #       Threat Detection         #
+    #      Blocking Logic            #
     # ============================== #
 
-    # (Already defined above in Blocking Logic)
+    def check_and_block_enemy_threats(self, game, threat_length=2):
+        """
+        Generalized method to check and block enemy threats in all directions,
+        including threats that wrap around the grid edges.
 
+        Args:
+            game (Game): The current game state.
+            threat_length (int): Number of consecutive enemy pieces that constitute a threat.
+
+        Returns:
+            move (list or tuple): [row, col] or [r0, c0, r1, c1] if a blocking move is found, else None.
+        """
+        self.logger.debug("Checking and attempting to block enemy threats.")
+        enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
+        directions = [
+            (0, 1),   # Horizontal
+            (1, 0),   # Vertical
+            (1, 1),   # Diagonal down-right
+            (1, -1)   # Diagonal down-left
+        ]
+
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                for dr, dc in directions:
+                    threat_blocking_positions = self.detect_threat(game, r, c, dr, dc, enemy, threat_length)
+                    if threat_blocking_positions:
+                        blocking_move = self.select_blocking_move(game, threat_blocking_positions, enemy)
+                        if blocking_move:
+                            self.logger.debug(f"Blocking enemy threat by placing/moving at {blocking_move} in direction ({dr}, {dc})")
+                            return blocking_move
+        return None
+
+    def detect_threat(self, game, start_r, start_c, dr, dc, enemy, threat_length):
+        """
+        Detects if there's a threat starting from (start_r, start_c) in the direction (dr, dc),
+        considering wrap-around if necessary.
+
+        Args:
+            game (Game): The current game state.
+            start_r (int): Starting row.
+            start_c (int): Starting column.
+            dr (int): Row direction increment.
+            dc (int): Column direction increment.
+            enemy (int): Enemy player identifier.
+            threat_length (int): Number of consecutive enemy pieces that constitute a threat.
+
+        Returns:
+            list: List of blocking positions that can prevent the threat, else None.
+        """
+        threat_positions = []
+        for i in range(threat_length):
+            r = (start_r + i * dr) % BOARD_SIZE
+            c = (start_c + i * dc) % BOARD_SIZE
+            if game.board[r][c] == enemy:
+                threat_positions.append((r, c))
+            else:
+                break
+
+        if len(threat_positions) == threat_length:
+            # Check for possible blocking positions before and after the threat
+            before_r = (start_r - dr) % BOARD_SIZE
+            before_c = (start_c - dc) % BOARD_SIZE
+            after_r = (start_r + threat_length * dr) % BOARD_SIZE
+            after_c = (start_c + threat_length * dc) % BOARD_SIZE
+            blocking_positions = []
+
+            if game.turn_count < 16:
+                # Before 16 moves: Blocking by placement
+                if game.is_valid_placement(before_r, before_c):
+                    blocking_positions.append((before_r, before_c))
+                if game.is_valid_placement(after_r, after_c):
+                    blocking_positions.append((after_r, after_c))
+            else:
+                # After 16 moves: Blocking by movement
+                # Find moves that can place/move a piece to blocking positions
+                for move in self.get_possible_moves(game):
+                    if len(move) != 4:
+                        continue  # Only movement moves
+                    r0, c0, r1, c1 = move
+                    if (r1, c1) in [(before_r, before_c), (after_r, after_c)]:
+                        blocking_positions.append(move)
+
+            if blocking_positions:
+                return blocking_positions
+        return None
+
+    def select_blocking_move(self, game, threat_blocking_positions, enemy):
+        """
+        Selects a blocking move from the available blocking positions,
+        ensuring that the move is valid and effective.
+
+        Args:
+            game (Game): The current game state.
+            threat_blocking_positions (list): List of blocking positions or movement moves.
+            enemy (int): Enemy player identifier.
+
+        Returns:
+            list or tuple: [row, col] or [r0, c0, r1, c1] of the blocking move, else None.
+        """
+        self.logger.debug("Selecting a blocking move from potential blocking positions.")
+        for move in threat_blocking_positions:
+            if len(move) == 2:
+                # Blocking by placement
+                r, c = move
+                if game.is_valid_placement(r, c):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
+            elif len(move) == 4:
+                # Blocking by movement
+                r0, c0, r1, c1 = move
+                if game.is_valid_move(r0, c0, r1, c1):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
+        return None
+
+    def is_block_effective(self, game, move, enemy):
+        """
+        Simulates placing/moving a blocking move and checks if the enemy can still win immediately.
+
+        Args:
+            game (Game): The current game state.
+            move (tuple): The blocking move as (row, col) or (r0, c0, r1, c1).
+            enemy (int): The enemy player's identifier.
+
+        Returns:
+            bool: True if the blocking move effectively prevents the enemy from winning immediately, else False.
+        """
+        self.logger.debug(f"Checking if blocking move {move} is effective.")
+        # Simulate the blocking move
+        temp_game = copy.deepcopy(game)
+        try:
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
+            else:
+                self.logger.debug(f"Unknown move format during blocking effectiveness check: {move}")
+                return False
+        except ValueError as e:
+            self.logger.debug(f"Error applying blocking move {move}: {e}")
+            return False  # Invalid move, cannot be effective
+
+        temp_game.turn_count += 1
+
+        # Check if the enemy can still win immediately after the block
+        enemy_wins = self.enemy_can_win_immediately(temp_game, enemy)
+        is_effective = not enemy_wins
+        self.logger.debug(f"Blocking move effectiveness: {is_effective}")
+        return is_effective
+
+    def enemy_can_win_immediately(self, game, enemy):
+        """
+        Checks if the enemy can win in their next move.
+
+        Args:
+            game (Game): The current game state after blocking.
+            enemy (int): The enemy player's identifier.
+
+        Returns:
+            bool: True if the enemy can win immediately, False otherwise.
+        """
+        self.logger.debug("Checking if the enemy can win immediately after the block.")
+        # Temporarily switch to the enemy's turn
+        temp_game = copy.deepcopy(game)
+        temp_game.current_player = enemy
+
+        # Get all possible moves for the enemy
+        enemy_moves = self.get_possible_moves(temp_game)
+
+        # Check if any of the enemy's moves lead to a win
+        for move in enemy_moves:
+            temp_move_game = copy.deepcopy(temp_game)
+            try:
+                if len(move) == 2:
+                    temp_move_game.place_checker(move[0], move[1])
+                elif len(move) == 4:
+                    temp_move_game.move_checker(move[0], move[1], move[2], move[3])
+                else:
+                    continue  # Invalid move format
+            except ValueError:
+                continue  # Skip invalid moves
+
+            if temp_move_game.check_winner() == enemy:
+                self.logger.debug(f"Enemy can win immediately with move: {move}")
+                return True  # Enemy can win immediately
+
+        self.logger.debug("Enemy cannot win immediately after the block.")
+        return False  # Enemy cannot win immediately
+
+    # ============================== #
+    #      Special Move Logic        #
+    # ============================== #
+
+    def perform_special_move_selection(self, game, possible_moves):
+        """
+        After 16 moves, pick a random piece that is not blocking anything and move it somewhere else.
+
+        Args:
+            game (Game): The current game state.
+            possible_moves (list): List of all possible valid moves.
+
+        Returns:
+            tuple or list: The selected special move, else None.
+        """
+        self.logger.debug("Performing special move selection after 16 moves.")
+        non_blocking_pieces = self.get_non_blocking_pieces(game)
+
+        if not non_blocking_pieces:
+            self.logger.warning("No non-blocking pieces available for special move selection.")
+            return None
+
+        # Select a random non-blocking piece
+        selected_piece = random.choice(non_blocking_pieces)
+        self.logger.info(f"Selected non-blocking piece at ({selected_piece[0]}, {selected_piece[1]}) for special move.")
+
+        # Find all possible movement moves for the selected piece
+        piece_moves = []
+        for move in possible_moves:
+            if len(move) != 4:
+                continue  # Only movement moves
+            r0, c0, r1, c1 = move
+            if (r0, c0) == selected_piece:
+                piece_moves.append(move)
+
+        if not piece_moves:
+            self.logger.warning(f"No valid movement moves available for the selected piece at ({selected_piece[0]}, {selected_piece[1]}).")
+            return None
+
+        # Select a random movement move for the selected piece
+        selected_move = random.choice(piece_moves)
+        self.logger.info(f"Selected special movement move: {selected_move}")
+        return selected_move
+
+    # ============================== #
+    #      Helper Functions          #
+    # ============================== #
+
+    def find_safe_move(self, game, possible_moves):
+        """
+        Attempts to find a safe move from the list of possible moves.
+
+        Args:
+            game (Game): The current game state.
+            possible_moves (list): List of possible moves.
+
+        Returns:
+            list: A safe move as [row, col] or [r0, c0, r1, c1], else None.
+        """
+        self.logger.debug("Attempting to find a safe move.")
+        safe_moves = []
+        for move in possible_moves:
+            if self.is_move_safe(game, move):
+                safe_moves.append(move)
+
+        if safe_moves:
+            selected_move = random.choice(safe_moves)
+            self.logger.info(f"Selected safe move: {selected_move}")
+            return selected_move
+        else:
+            self.logger.warning("No safe moves available.")
+            return None
+
+    # ============================== #
+    #         Safety Checks          #
+    # ============================== #
+
+    def is_move_safe(self, game, move):
+        """
+        Checks if making the given move will not allow the enemy to win immediately.
+
+        Args:
+            game (Game): The current game state.
+            move (tuple): The move to be checked.
+
+        Returns:
+            bool: True if the move is safe, False otherwise.
+        """
+        self.logger.debug(f"Checking if move {move} is safe.")
+        temp_game = copy.deepcopy(game)
+        try:
+            # Apply the move
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
+            else:
+                self.logger.debug(f"Unknown move format during safety check: {move}")
+                return False
+            temp_game.turn_count += 1
+
+            # Check for a win
+            winner = temp_game.check_winner()
+            if winner == self.player:
+                self.logger.debug("Move results in a win. It is safe.")
+                return True  # Winning move is safe
+            elif winner == PLAYER1 or winner == PLAYER2:
+                self.logger.debug("Move results in a loss. It is unsafe.")
+                return False  # Move leads to a loss
+            else:
+                # Switch to enemy's turn
+                temp_game.current_player = PLAYER2 if self.player == PLAYER1 else PLAYER1
+
+                # Check if enemy can win in their next move
+                enemy_wins = self.enemy_can_win_immediately(temp_game, self.player)
+                is_safe = not enemy_wins
+                self.logger.debug(f"Move safety after enemy's response: {is_safe}")
+                return is_safe
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move} during safety check: {e}")
+            return False  # Invalid move is considered unsafe
+
+    # ============================== #
+    #         Simulation Steps       #
+    # ============================== #
+
+    def backpropagate(self, node, winner):
+        """Update the node and its ancestors with the simulation result."""
+        self.logger.debug(f"Backpropagating result: Winner={winner}")
+        while node is not None:
+            node.visits += 1
+            if winner == self.player:
+                node.wins += 1
+            elif winner == -self.player:
+                node.wins -= 1
+            # Optionally, handle draws or neutral outcomes here
+            node = node.parent
+
+    def simulate(self, game):
+        """Simulates a random play-out from the current game state."""
+        self.simulation_count += 1  # Increment simulation count
+        current_depth = 0  # Initialize depth for this simulation
+        self.logger.debug("Starting simulation.")
+        while True:
+            winner = game.check_winner()
+            if winner != EMPTY:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug(f"Simulation ended with winner: {winner}")
+                return winner
+
+            possible_moves = self.get_possible_moves(game)
+            if not possible_moves:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug("Simulation ended in a draw.")
+                return EMPTY  # Draw
+
+            move = random.choice(possible_moves)
+            self.apply_move(game, move)
+            current_depth += 1
+
+            # **Invoke Blocking Logic During Simulation**
+            # This ensures that after every simulated move, we attempt to block any new threats
+            blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
+            if blocking_move:
+                self.logger.debug(f"Simulation: Blocking enemy threat by placing/moving at {blocking_move}")
+                self.apply_move(game, blocking_move)
+
+    def apply_move(self, game, move):
+        """Applies a move to the game state."""
+        try:
+            if len(move) == 2:
+                r, c = move
+                game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                game.move_checker(r0, c0, r1, c1)
+            else:
+                raise ValueError(f"Unknown move format: {move}")
+            game.turn_count += 1
+            # Check for a win
+            winner = game.check_winner()
+            if winner != EMPTY:
+                game.current_player = EMPTY  # No further moves
+            else:
+                game.current_player *= -1    # Switch player
+            self.logger.debug(f"Applied move {move}. Current player is now {game.current_player}.")
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move}: {e}")
+            raise
+
+    # ============================== #
+    #      Blocking Logic            #
+    # ============================== #
+
+    def check_and_block_enemy_threats(self, game, threat_length=2):
+        """
+        Generalized method to check and block enemy threats in all directions,
+        including threats that wrap around the grid edges.
+
+        Args:
+            game (Game): The current game state.
+            threat_length (int): Number of consecutive enemy pieces that constitute a threat.
+
+        Returns:
+            move (list or tuple): [row, col] or [r0, c0, r1, c1] if a blocking move is found, else None.
+        """
+        self.logger.debug("Checking and attempting to block enemy threats.")
+        enemy = PLAYER2 if self.player == PLAYER1 else PLAYER1
+        directions = [
+            (0, 1),   # Horizontal
+            (1, 0),   # Vertical
+            (1, 1),   # Diagonal down-right
+            (1, -1)   # Diagonal down-left
+        ]
+
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                for dr, dc in directions:
+                    threat_blocking_positions = self.detect_threat(game, r, c, dr, dc, enemy, threat_length)
+                    if threat_blocking_positions:
+                        blocking_move = self.select_blocking_move(game, threat_blocking_positions, enemy)
+                        if blocking_move:
+                            self.logger.debug(f"Blocking enemy threat by placing/moving at {blocking_move} in direction ({dr}, {dc})")
+                            return blocking_move
+        return None
+
+    def detect_threat(self, game, start_r, start_c, dr, dc, enemy, threat_length):
+        """
+        Detects if there's a threat starting from (start_r, start_c) in the direction (dr, dc),
+        considering wrap-around if necessary.
+
+        Args:
+            game (Game): The current game state.
+            start_r (int): Starting row.
+            start_c (int): Starting column.
+            dr (int): Row direction increment.
+            dc (int): Column direction increment.
+            enemy (int): Enemy player identifier.
+            threat_length (int): Number of consecutive enemy pieces that constitute a threat.
+
+        Returns:
+            list: List of blocking positions that can prevent the threat, else None.
+        """
+        threat_positions = []
+        for i in range(threat_length):
+            r = (start_r + i * dr) % BOARD_SIZE
+            c = (start_c + i * dc) % BOARD_SIZE
+            if game.board[r][c] == enemy:
+                threat_positions.append((r, c))
+            else:
+                break
+
+        if len(threat_positions) == threat_length:
+            # Check for possible blocking positions before and after the threat
+            before_r = (start_r - dr) % BOARD_SIZE
+            before_c = (start_c - dc) % BOARD_SIZE
+            after_r = (start_r + threat_length * dr) % BOARD_SIZE
+            after_c = (start_c + threat_length * dc) % BOARD_SIZE
+            blocking_positions = []
+
+            if game.turn_count < 16:
+                # Before 16 moves: Blocking by placement
+                if game.is_valid_placement(before_r, before_c):
+                    blocking_positions.append((before_r, before_c))
+                if game.is_valid_placement(after_r, after_c):
+                    blocking_positions.append((after_r, after_c))
+            else:
+                # After 16 moves: Blocking by movement
+                # Find moves that can place/move a piece to blocking positions
+                for move in self.get_possible_moves(game):
+                    if len(move) != 4:
+                        continue  # Only movement moves
+                    r0, c0, r1, c1 = move
+                    if (r1, c1) in [(before_r, before_c), (after_r, after_c)]:
+                        blocking_positions.append(move)
+
+            if blocking_positions:
+                return blocking_positions
+        return None
+
+    def select_blocking_move(self, game, threat_blocking_positions, enemy):
+        """
+        Selects a blocking move from the available blocking positions,
+        ensuring that the move is valid and effective.
+
+        Args:
+            game (Game): The current game state.
+            threat_blocking_positions (list): List of blocking positions or movement moves.
+            enemy (int): Enemy player identifier.
+
+        Returns:
+            list or tuple: [row, col] or [r0, c0, r1, c1] of the blocking move, else None.
+        """
+        self.logger.debug("Selecting a blocking move from potential blocking positions.")
+        for move in threat_blocking_positions:
+            if len(move) == 2:
+                # Blocking by placement
+                r, c = move
+                if game.is_valid_placement(r, c):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
+            elif len(move) == 4:
+                # Blocking by movement
+                r0, c0, r1, c1 = move
+                if game.is_valid_move(r0, c0, r1, c1):
+                    if self.is_block_effective(game, move, enemy):
+                        return move
+        return None
+
+    # ============================== #
+    #      Blocking Effectiveness    #
+    # ============================== #
+
+    def is_block_effective(self, game, move, enemy):
+        """
+        Simulates placing/moving a blocking move and checks if the enemy can still win immediately.
+
+        Args:
+            game (Game): The current game state.
+            move (tuple): The blocking move as (row, col) or (r0, c0, r1, c1).
+            enemy (int): The enemy player's identifier.
+
+        Returns:
+            bool: True if the blocking move effectively prevents the enemy from winning immediately, else False.
+        """
+        self.logger.debug(f"Checking if blocking move {move} is effective.")
+        # Simulate the blocking move
+        temp_game = copy.deepcopy(game)
+        try:
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
+            else:
+                self.logger.debug(f"Unknown move format during blocking effectiveness check: {move}")
+                return False
+        except ValueError as e:
+            self.logger.debug(f"Error applying blocking move {move}: {e}")
+            return False  # Invalid move, cannot be effective
+
+        temp_game.turn_count += 1
+
+        # Check if the enemy can still win immediately after the block
+        enemy_wins = self.enemy_can_win_immediately(temp_game, enemy)
+        is_effective = not enemy_wins
+        self.logger.debug(f"Blocking move effectiveness: {is_effective}")
+        return is_effective
+
+    # ============================== #
+    #      Safety Checks             #
+    # ============================== #
+
+    def is_move_safe(self, game, move):
+        """
+        Checks if making the given move will not allow the enemy to win immediately.
+
+        Args:
+            game (Game): The current game state.
+            move (tuple): The move to be checked.
+
+        Returns:
+            bool: True if the move is safe, False otherwise.
+        """
+        self.logger.debug(f"Checking if move {move} is safe.")
+        temp_game = copy.deepcopy(game)
+        try:
+            # Apply the move
+            if len(move) == 2:
+                r, c = move
+                temp_game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                temp_game.move_checker(r0, c0, r1, c1)
+            else:
+                self.logger.debug(f"Unknown move format during safety check: {move}")
+                return False
+            temp_game.turn_count += 1
+
+            # Check for a win
+            winner = temp_game.check_winner()
+            if winner == self.player:
+                self.logger.debug("Move results in a win. It is safe.")
+                return True  # Winning move is safe
+            elif winner == PLAYER1 or winner == PLAYER2:
+                self.logger.debug("Move results in a loss. It is unsafe.")
+                return False  # Move leads to a loss
+            else:
+                # Switch to enemy's turn
+                temp_game.current_player = PLAYER2 if self.player == PLAYER1 else PLAYER1
+
+                # Check if enemy can win in their next move
+                enemy_wins = self.enemy_can_win_immediately(temp_game, self.player)
+                is_safe = not enemy_wins
+                self.logger.debug(f"Move safety after enemy's response: {is_safe}")
+                return is_safe
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move} during safety check: {e}")
+            return False  # Invalid move is considered unsafe
+
+    # ============================== #
+    #         Simulation Steps       #
+    # ============================== #
+
+    def backpropagate(self, node, winner):
+        """Update the node and its ancestors with the simulation result."""
+        self.logger.debug(f"Backpropagating result: Winner={winner}")
+        while node is not None:
+            node.visits += 1
+            if winner == self.player:
+                node.wins += 1
+            elif winner == -self.player:
+                node.wins -= 1
+            # Optionally, handle draws or neutral outcomes here
+            node = node.parent
+
+    def simulate(self, game):
+        """Simulates a random play-out from the current game state."""
+        self.simulation_count += 1  # Increment simulation count
+        current_depth = 0  # Initialize depth for this simulation
+        self.logger.debug("Starting simulation.")
+        while True:
+            winner = game.check_winner()
+            if winner != EMPTY:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug(f"Simulation ended with winner: {winner}")
+                return winner
+
+            possible_moves = self.get_possible_moves(game)
+            if not possible_moves:
+                if current_depth > self.max_simulation_depth:
+                    self.max_simulation_depth = current_depth
+                self.logger.debug("Simulation ended in a draw.")
+                return EMPTY  # Draw
+
+            move = random.choice(possible_moves)
+            self.apply_move(game, move)
+            current_depth += 1
+
+            # **Invoke Blocking Logic During Simulation**
+            # This ensures that after every simulated move, we attempt to block any new threats
+            blocking_move = self.check_and_block_enemy_threats(game, threat_length=2)
+            if blocking_move:
+                self.logger.debug(f"Simulation: Blocking enemy threat by placing/moving at {blocking_move}")
+                self.apply_move(game, blocking_move)
+
+    def apply_move(self, game, move):
+        """Applies a move to the game state."""
+        try:
+            if len(move) == 2:
+                r, c = move
+                game.place_checker(r, c)
+            elif len(move) == 4:
+                r0, c0, r1, c1 = move
+                game.move_checker(r0, c0, r1, c1)
+            else:
+                raise ValueError(f"Unknown move format: {move}")
+            game.turn_count += 1
+            # Check for a win
+            winner = game.check_winner()
+            if winner != EMPTY:
+                game.current_player = EMPTY  # No further moves
+            else:
+                game.current_player *= -1    # Switch player
+            self.logger.debug(f"Applied move {move}. Current player is now {game.current_player}.")
+        except ValueError as e:
+            self.logger.debug(f"Error applying move {move}: {e}")
+            raise
